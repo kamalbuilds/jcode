@@ -1105,3 +1105,35 @@ fn test_recover_within_budget_summary_line_variants() {
     assert!(line.contains("shortened 5 large tool result(s)"));
     assert!(!line.contains("dropped"));
 }
+
+/// Regression for the "compacting at 200K on a 1M model" bug.
+///
+/// `App::new` seeds `self.context_limit` from `provider.context_window()`, but
+/// nothing seeded the `CompactionManager`, which stayed on
+/// `DEFAULT_TOKEN_BUDGET` (200K) until the user happened to switch models. On a
+/// native-1M model (`claude-opus-5`) that silently discarded ~80% of the usable
+/// window: the context meter said 1M while compaction fired at 200K.
+///
+/// `CompactionManager::new_with_budget` exists so construction can never
+/// disagree with the provider.
+#[test]
+fn manager_constructed_with_provider_budget_does_not_use_default() {
+    let manager = CompactionManager::new_with_budget(1_000_000);
+    assert_eq!(manager.token_budget(), 1_000_000);
+    assert_ne!(
+        manager.token_budget(),
+        DEFAULT_TOKEN_BUDGET,
+        "manager fell back to the 200K default despite a 1M provider window"
+    );
+}
+
+#[test]
+fn manager_budget_survives_reset() {
+    let mut manager = CompactionManager::new_with_budget(1_000_000);
+    manager.reset();
+    assert_eq!(
+        manager.token_budget(),
+        1_000_000,
+        "reset() clobbered the provider-derived budget back to the 200K default"
+    );
+}

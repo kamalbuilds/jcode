@@ -758,6 +758,13 @@ impl App {
             app.status_notice = Some((notice, Instant::now()));
         }
 
+        // The registry's compaction manager may have been built before the
+        // provider was known (e.g. `Registry::empty()` in remote mode), which
+        // leaves it on the 200K default. Reconcile it with the window the app
+        // just computed so compaction never fires at a fraction of the real
+        // context limit.
+        app.sync_compaction_budget_to_context_limit();
+
         app
     }
 
@@ -1199,6 +1206,13 @@ impl App {
         for notice in app.provider.drain_startup_notices() {
             app.status_notice = Some((notice, Instant::now()));
         }
+
+        // The registry's compaction manager may have been built before the
+        // provider was known (e.g. `Registry::empty()` in remote mode), which
+        // leaves it on the 200K default. Reconcile it with the window the app
+        // just computed so compaction never fires at a fraction of the real
+        // context limit.
+        app.sync_compaction_budget_to_context_limit();
 
         app
     }

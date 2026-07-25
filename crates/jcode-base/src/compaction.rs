@@ -206,6 +206,16 @@ pub struct CompactionManager {
 
 impl CompactionManager {
     pub fn new() -> Self {
+        Self::new_with_budget(DEFAULT_TOKEN_BUDGET)
+    }
+
+    /// Construct a manager whose budget is the caller's real context window.
+    ///
+    /// Prefer this over [`CompactionManager::new`] wherever the provider is
+    /// known. `new()` has to assume [`DEFAULT_TOKEN_BUDGET`] (200K), so on a
+    /// native-1M model an un-seeded manager silently compacts at 20% of the
+    /// usable window while the context meter reports 1M.
+    pub fn new_with_budget(token_budget: usize) -> Self {
         let cfg = crate::config::config().compaction.clone();
         let mode = cfg.mode.clone();
         Self {
@@ -217,7 +227,7 @@ impl CompactionManager {
             pending_cutoff: 0,
             total_turns: 0,
             suppress_compaction_until_new_message: false,
-            token_budget: DEFAULT_TOKEN_BUDGET,
+            token_budget,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
@@ -230,9 +240,12 @@ impl CompactionManager {
         }
     }
 
-    /// Reset all compaction state
+    /// Reset all compaction state, preserving the negotiated token budget.
+    ///
+    /// The budget describes the provider, not the conversation, so a transcript
+    /// reset must not silently drop a 1M window back to the 200K default.
     pub fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self::new_with_budget(self.token_budget);
     }
 
     pub fn with_budget(mut self, budget: usize) -> Self {

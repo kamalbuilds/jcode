@@ -140,12 +140,19 @@ pub struct Registry {
 
 impl Clone for Registry {
     fn clone(&self) -> Self {
+        // Preserve the negotiated context window: a fresh 200K-default manager
+        // would silently compact subagents at 20% of a 1M window.
+        let budget = self
+            .compaction
+            .read()
+            .map(|m| m.token_budget())
+            .unwrap_or(jcode_base::compaction::DEFAULT_TOKEN_BUDGET);
         Self {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
-            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            compaction: Arc::new(RwLock::new(CompactionManager::new_with_budget(budget))),
         }
     }
 }
@@ -299,13 +306,19 @@ impl Registry {
         tools
     }
 
-    pub async fn new(_provider: Arc<dyn Provider>) -> Self {
+    pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let start = std::time::Instant::now();
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
         let skills_ms = skills_start.elapsed().as_millis();
         let compaction_start = std::time::Instant::now();
-        let compaction = Arc::new(RwLock::new(CompactionManager::new()));
+        // Seed the compaction budget from the live provider window. Without
+        // this the manager sits on the 200K default for the whole session even
+        // when the model advertises 1M (issue: compaction fired at 200K on
+        // claude-opus-5).
+        let compaction = Arc::new(RwLock::new(CompactionManager::new_with_budget(
+            provider.context_window(),
+        )));
         let compaction_ms = compaction_start.elapsed().as_millis();
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {

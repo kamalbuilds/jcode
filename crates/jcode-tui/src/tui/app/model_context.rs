@@ -625,6 +625,25 @@ impl App {
         }
     }
 
+    /// Push the app's current `context_limit` into the compaction manager.
+    ///
+    /// Construction paths can build the manager before the provider is known,
+    /// leaving it on the 200K default while the app already knows the real
+    /// window. When the two disagree, compaction fires early and silently
+    /// discards most of the usable context.
+    pub(super) fn sync_compaction_budget_to_context_limit(&mut self) {
+        let limit = self.context_limit as usize;
+        if limit == 0 {
+            return;
+        }
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            if manager.token_budget() != limit {
+                manager.set_budget(limit);
+            }
+        }
+    }
+
     pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
         let limit = if self.is_remote {
             crate::provider::context_limit_for_model_with_provider(

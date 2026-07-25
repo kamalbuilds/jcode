@@ -142,9 +142,11 @@ impl Clone for Registry {
     fn clone(&self) -> Self {
         // Preserve the negotiated context window: a fresh 200K-default manager
         // would silently compact subagents at 20% of a 1M window.
+        // `Clone` is sync and this is a tokio RwLock, so use the non-blocking
+        // read and fall back to the default if the lock is momentarily held.
         let budget = self
             .compaction
-            .read()
+            .try_read()
             .map(|m| m.token_budget())
             .unwrap_or(jcode_base::compaction::DEFAULT_TOKEN_BUDGET);
         Self {

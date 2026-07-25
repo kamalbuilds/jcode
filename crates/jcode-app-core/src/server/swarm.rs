@@ -1532,7 +1532,16 @@ pub(super) async fn run_swarm_task(
     prompt: &str,
 ) -> Result<String> {
     let started = Instant::now();
-    let (provider, registry, session_id, working_dir, coordinator_model, provider_key, route) = {
+    let (
+        provider,
+        registry,
+        session_id,
+        working_dir,
+        coordinator_model,
+        provider_key,
+        route,
+        available_models,
+    ) = {
         let agent = agent.lock().await;
         (
             agent.provider_fork(),
@@ -1542,15 +1551,32 @@ pub(super) async fn run_swarm_task(
             agent.provider_model(),
             agent.session_provider_key(),
             agent.session_route_api_method(),
+            agent.available_models_for_switching(),
         )
     };
+
+    // Most worker tasks are mechanical and do not need the coordinator's
+    // frontier model. Routing only ever picks a cheaper in-family model, so the
+    // inherited auth route below stays valid and spend can only go down.
+    let worker_model = if crate::config::config().agents.swarm_model_routing {
+        jcode_base::model_routing::route(
+            subagent_type,
+            prompt,
+            &coordinator_model,
+            &available_models,
+        )
+        .unwrap_or_else(|| coordinator_model.clone())
+    } else {
+        coordinator_model.clone()
+    };
+
     let parent_session_id = session_id.clone();
     let mut session = Session::create(
         Some(session_id),
         Some(format!("{} (@{} swarm)", description, subagent_type)),
     );
     let child_session_id = session.id.clone();
-    session.model = Some(coordinator_model);
+    session.model = Some(worker_model.clone());
     // Inherit the coordinator's exact auth identity so the forked worker keeps
     // the same provider/auth route (OAuth vs API, openai-compatible profile)
     // instead of silently falling back to the config default on persistence.
@@ -1567,6 +1593,8 @@ pub(super) async fn run_swarm_task(
             ("parent_session_id", parent_session_id.clone()),
             ("child_session_id", child_session_id.clone()),
             ("subagent_type", subagent_type.to_string()),
+            ("coordinator_model", coordinator_model.clone()),
+            ("worker_model", worker_model.clone()),
             ("description_chars", description.chars().count().to_string()),
             ("prompt_chars", prompt.chars().count().to_string()),
         ],

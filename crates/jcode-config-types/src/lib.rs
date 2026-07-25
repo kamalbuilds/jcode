@@ -599,6 +599,23 @@ pub struct AgentsConfig {
     /// Env override: `JCODE_SWARM_MAX_CONCURRENT_AGENTS`.
     #[serde(default = "default_swarm_max_concurrent_agents")]
     pub swarm_max_concurrent_agents: usize,
+    /// Route spawned swarm workers to a cheaper in-family model when the task
+    /// looks mechanical (search, summarize, format) instead of inheriting the
+    /// coordinator's frontier model. Never escalates above the coordinator's
+    /// tier and never crosses provider families. Default `true`.
+    /// Env override: `JCODE_SWARM_MODEL_ROUTING`.
+    #[serde(default = "default_swarm_model_routing")]
+    pub swarm_model_routing: bool,
+}
+
+/// Route spawned swarm workers to a cheaper in-family model when the task is
+/// mechanical, rather than inheriting the coordinator's frontier model.
+///
+/// Routing never escalates above the coordinator's own tier and never crosses
+/// provider families, so it can only reduce spend and never breaks the
+/// inherited auth route. Set `false` to make every worker inherit verbatim.
+fn default_swarm_model_routing() -> bool {
+    true
 }
 
 fn default_swarm_max_concurrent_agents() -> usize {
@@ -642,6 +659,7 @@ impl Default for AgentsConfig {
             memory_embedding_base_url: None,
             memory_embedding_dim: None,
             swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
+            swarm_model_routing: default_swarm_model_routing(),
         }
     }
 }

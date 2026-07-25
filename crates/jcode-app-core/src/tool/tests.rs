@@ -95,6 +95,63 @@ async fn subagent_tool_is_not_registered() {
     );
 }
 
+/// A provider advertising a native 1M context window, like `claude-opus-5`.
+struct WideContextProvider;
+
+#[async_trait]
+impl Provider for WideContextProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        Err(anyhow::anyhow!("not used"))
+    }
+
+    fn name(&self) -> &str {
+        "wide"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(WideContextProvider)
+    }
+
+    fn context_window(&self) -> usize {
+        1_000_000
+    }
+}
+
+#[tokio::test]
+async fn registry_seeds_compaction_budget_from_provider_window() {
+    // Registry::new previously ignored the provider, so a 1M model got a
+    // manager that compacted at the 200K default.
+    let provider: Arc<dyn Provider> = Arc::new(WideContextProvider);
+    let registry = Registry::new(provider).await;
+
+    let budget = registry.compaction().read().await.token_budget();
+    assert_eq!(
+        budget, 1_000_000,
+        "registry must seed the compaction budget from the provider's context window"
+    );
+}
+
+#[tokio::test]
+async fn cloned_registry_inherits_negotiated_budget() {
+    // Every spawned subagent clones the registry. A fresh 200K manager here
+    // would compact subagents at 20% of the real window.
+    let provider: Arc<dyn Provider> = Arc::new(WideContextProvider);
+    let registry = Registry::new(provider).await;
+    let child = registry.clone();
+
+    let budget = child.compaction().read().await.token_budget();
+    assert_eq!(
+        budget, 1_000_000,
+        "a cloned registry must inherit the parent's negotiated budget"
+    );
+}
+
 struct BareSchemaTool;
 
 #[async_trait]

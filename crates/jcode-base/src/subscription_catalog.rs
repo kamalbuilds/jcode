@@ -120,10 +120,19 @@ pub struct CuratedModel {
 
 pub const CURATED_MODELS: &[CuratedModel] = &[
     CuratedModel {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
+        aliases: &["claude-opus-5", "opus-5", "opus 5", "claude opus 5"],
+        default_enabled: true,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
+    },
+    CuratedModel {
         id: "claude-opus-4-8",
         display_name: "Claude Opus 4.8",
         aliases: &["claude-opus-4-8", "opus-4-8", "opus 4.8", "claude opus 4.8"],
-        default_enabled: true,
+        default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
         note: "Frontier model; routed server-side to Anthropic by the jcode router.",
@@ -523,6 +532,7 @@ mod tests {
     use super::*;
 
     const EXPECTED_PLUS_MODELS: &[&str] = &[
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-5",
         "claude-sonnet-4-6",
@@ -547,6 +557,8 @@ mod tests {
 
     #[test]
     fn curated_model_aliases_resolve_to_canonical_ids() {
+        assert_eq!(canonical_model_id("opus 5"), Some("claude-opus-5"));
+        assert_eq!(canonical_model_id("Claude Opus 5"), Some("claude-opus-5"));
         assert_eq!(canonical_model_id("opus 4.8"), Some("claude-opus-4-8"));
         assert_eq!(
             canonical_model_id("Claude Opus 4.8"),
@@ -602,7 +614,7 @@ mod tests {
 
     #[test]
     fn default_model_is_opus() {
-        assert_eq!(default_model().id, "claude-opus-4-8");
+        assert_eq!(default_model().id, "claude-opus-5");
     }
 
     #[test]

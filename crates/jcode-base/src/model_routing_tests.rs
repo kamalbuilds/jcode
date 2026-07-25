@@ -280,3 +280,137 @@ fn production_catalog_never_escalates_from_each_tier() {
         }
     }
 }
+
+/// The full Anthropic ladder as `available_efforts` reports it for a modern
+/// model (Opus 5, Sonnet 5, Fable 5).
+fn full_effort_ladder() -> Vec<String> {
+    ["none", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[test]
+fn light_work_drops_effort_to_none() {
+    // The bug this exists to prevent: a routed grep worker on haiku still
+    // billing the coordinator's max-effort thinking tokens.
+    assert_eq!(
+        select_effort(Difficulty::Light, Some("max"), &full_effort_ladder()),
+        Some("none".to_string())
+    );
+    assert_eq!(
+        select_effort(Difficulty::Light, Some("high"), &full_effort_ladder()),
+        Some("none".to_string())
+    );
+}
+
+#[test]
+fn standard_work_caps_effort_at_medium() {
+    assert_eq!(
+        select_effort(Difficulty::Standard, Some("max"), &full_effort_ladder()),
+        Some("medium".to_string())
+    );
+    assert_eq!(
+        select_effort(Difficulty::Standard, Some("xhigh"), &full_effort_ladder()),
+        Some("medium".to_string())
+    );
+}
+
+#[test]
+fn effort_never_escalates() {
+    // A coordinator already at or below the target keeps its own effort, so
+    // routing can only ever reduce thinking spend.
+    for (difficulty, coordinator) in [
+        (Difficulty::Light, "none"),
+        (Difficulty::Standard, "none"),
+        (Difficulty::Standard, "low"),
+        (Difficulty::Standard, "medium"),
+    ] {
+        assert_eq!(
+            select_effort(difficulty, Some(coordinator), &full_effort_ladder()),
+            None,
+            "{difficulty:?} from {coordinator} must inherit, not escalate"
+        );
+    }
+}
+
+#[test]
+fn heavy_work_always_inherits_coordinator_effort() {
+    // Heavy tasks are where a wrong answer is expensive to detect. A
+    // coordinator that deliberately raised effort must keep it.
+    for coordinator in ["none", "low", "medium", "high", "xhigh", "max"] {
+        assert_eq!(
+            select_effort(Difficulty::Heavy, Some(coordinator), &full_effort_ladder()),
+            None,
+            "heavy work must never override coordinator effort {coordinator}"
+        );
+    }
+}
+
+#[test]
+fn unknown_or_absent_coordinator_effort_inherits() {
+    // `None` means the model default is in play, which we cannot rank, so
+    // guessing risks silently overriding a stronger default.
+    assert_eq!(
+        select_effort(Difficulty::Light, None, &full_effort_ladder()),
+        None
+    );
+    assert_eq!(
+        select_effort(Difficulty::Light, Some("turbo"), &full_effort_ladder()),
+        None
+    );
+}
+
+#[test]
+fn effort_steps_down_to_a_level_the_model_accepts() {
+    // A model whose ladder omits the target must not be sent it. Standard wants
+    // `medium`; a ladder of none/low steps down to `low` rather than sending an
+    // effort the provider would reject.
+    let short_ladder: Vec<String> = ["none", "low"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        select_effort(Difficulty::Standard, Some("max"), &short_ladder),
+        Some("low".to_string())
+    );
+    // No ladder at all (model has no reasoning effort) means nothing to set.
+    assert_eq!(select_effort(Difficulty::Standard, Some("max"), &[]), None);
+}
+
+#[test]
+fn swarm_sentinels_rank_above_max() {
+    // `swarm`/`swarm-deep` mean "strongest the model supports". Ranking them
+    // below `max` would make a swarm coordinator look cheap and suppress the
+    // downgrade that saves the most.
+    assert_eq!(
+        select_effort(Difficulty::Light, Some("swarm"), &full_effort_ladder()),
+        Some("none".to_string())
+    );
+    assert_eq!(
+        select_effort(Difficulty::Standard, Some("swarm-deep"), &full_effort_ladder()),
+        Some("medium".to_string())
+    );
+}
+
+#[test]
+fn effort_selection_never_escalates_across_the_whole_ladder() {
+    // Property check: for every coordinator effort and every difficulty, the
+    // selected effort is never stronger than the coordinator's own, and is
+    // always a level the model actually accepts.
+    let ladder = full_effort_ladder();
+    for coordinator in EFFORT_LADDER {
+        let coordinator_rank = effort_rank(coordinator).expect("ladder entry ranks");
+        for difficulty in [Difficulty::Light, Difficulty::Standard, Difficulty::Heavy] {
+            let Some(picked) = select_effort(difficulty, Some(coordinator), &ladder) else {
+                continue;
+            };
+            let picked_rank = effort_rank(&picked).expect("picked effort ranks");
+            assert!(
+                picked_rank <= coordinator_rank,
+                "{coordinator} escalated to {picked} for {difficulty:?}"
+            );
+            assert!(
+                ladder.contains(&picked),
+                "{picked} is not a level the model accepts"
+            );
+        }
+    }
+}

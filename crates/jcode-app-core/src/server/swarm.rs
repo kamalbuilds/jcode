@@ -1541,6 +1541,8 @@ pub(super) async fn run_swarm_task(
         provider_key,
         route,
         available_models,
+        coordinator_effort,
+        available_efforts,
     ) = {
         let agent = agent.lock().await;
         (
@@ -1552,22 +1554,36 @@ pub(super) async fn run_swarm_task(
             agent.session_provider_key(),
             agent.session_route_api_method(),
             agent.available_models_for_switching(),
+            agent.session_reasoning_effort(),
+            agent.available_efforts(),
         )
     };
 
     // Most worker tasks are mechanical and do not need the coordinator's
     // frontier model. Routing only ever picks a cheaper in-family model, so the
     // inherited auth route below stays valid and spend can only go down.
-    let worker_model = if crate::config::config().agents.swarm_model_routing {
-        jcode_base::model_routing::route(
-            subagent_type,
-            prompt,
-            &coordinator_model,
-            &available_models,
+    let difficulty = jcode_base::model_routing::classify(subagent_type, prompt);
+    let (worker_model, worker_effort) = if crate::config::config().agents.swarm_model_routing {
+        (
+            jcode_base::model_routing::select_model(
+                difficulty,
+                &coordinator_model,
+                &available_models,
+            )
+            .unwrap_or_else(|| coordinator_model.clone()),
+            // Model tier is only half the bill. A routed worker that inherits the
+            // coordinator's `max` effort still pays frontier thinking tokens to
+            // run a grep, so cap effort by the same difficulty and the same
+            // never-escalate rule.
+            jcode_base::model_routing::select_effort(
+                difficulty,
+                coordinator_effort.as_deref(),
+                &available_efforts,
+            )
+            .or_else(|| coordinator_effort.clone()),
         )
-        .unwrap_or_else(|| coordinator_model.clone())
     } else {
-        coordinator_model.clone()
+        (coordinator_model.clone(), coordinator_effort.clone())
     };
 
     let parent_session_id = session_id.clone();
@@ -1577,6 +1593,9 @@ pub(super) async fn run_swarm_task(
     );
     let child_session_id = session.id.clone();
     session.model = Some(worker_model.clone());
+    // Applied (and validated against the worker's resolved provider/model) by
+    // `restore_reasoning_effort_from_session` in `Agent::new_with_session`.
+    session.reasoning_effort = worker_effort.clone();
     // Inherit the coordinator's exact auth identity so the forked worker keeps
     // the same provider/auth route (OAuth vs API, openai-compatible profile)
     // instead of silently falling back to the config default on persistence.
@@ -1595,6 +1614,11 @@ pub(super) async fn run_swarm_task(
             ("subagent_type", subagent_type.to_string()),
             ("coordinator_model", coordinator_model.clone()),
             ("worker_model", worker_model.clone()),
+            (
+                "coordinator_effort",
+                coordinator_effort.clone().unwrap_or_default(),
+            ),
+            ("worker_effort", worker_effort.clone().unwrap_or_default()),
             ("description_chars", description.chars().count().to_string()),
             ("prompt_chars", prompt.chars().count().to_string()),
         ],

@@ -313,6 +313,85 @@ pub fn route(
     select_model(classify(agent_type, prompt), coordinator_model, available)
 }
 
+/// Reasoning effort ladder, weakest to strongest, as accepted on the wire.
+///
+/// `swarm`/`swarm-deep` are UI sentinels that sit above `max`; they are ranked
+/// at the top so a coordinator running one is never treated as cheap by the
+/// never-escalate cap.
+const EFFORT_LADDER: &[&str] = &[
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "swarm",
+    "swarm-deep",
+];
+
+/// Position of `effort` on [`EFFORT_LADDER`], or `None` if unrecognized.
+fn effort_rank(effort: &str) -> Option<usize> {
+    let normalized = effort.trim().to_ascii_lowercase();
+    EFFORT_LADDER.iter().position(|level| *level == normalized)
+}
+
+/// The effort a difficulty level wants, before the never-escalate cap.
+///
+/// Light work is mechanical and verifiable, so thinking tokens buy nothing.
+/// Heavy work returns `None`, meaning "inherit": a coordinator that deliberately
+/// raised its own effort must not have that decision silently overridden.
+fn desired_effort(difficulty: Difficulty) -> Option<&'static str> {
+    match difficulty {
+        Difficulty::Light => Some("none"),
+        Difficulty::Standard => Some("medium"),
+        Difficulty::Heavy => None,
+    }
+}
+
+/// Pick the reasoning effort a spawned worker should run for `difficulty`.
+///
+/// Returns `None` when the coordinator's effort should be inherited unchanged.
+///
+/// This is the effort half of [`select_model`] and carries the same
+/// never-escalate invariant: the result is capped at the coordinator's own
+/// effort, so routing can only ever reduce thinking spend. Without it a routed
+/// worker gets a cheap model running at the coordinator's `max` effort, which is
+/// the expensive half of the bill for mechanical work.
+///
+/// `available` is the effort list the worker's provider/model actually accepts
+/// (`Provider::available_efforts`). A level absent from that list is stepped
+/// down to the strongest supported level at or below it, so a model with a
+/// shorter ladder never receives an effort it would reject.
+pub fn select_effort(
+    difficulty: Difficulty,
+    coordinator_effort: Option<&str>,
+    available: &[String],
+) -> Option<String> {
+    let target = desired_effort(difficulty)?;
+    let target_rank = effort_rank(target)?;
+
+    // Unknown or absent coordinator effort means the model default is in play,
+    // which we cannot compare against, so inherit rather than guess.
+    let coordinator_rank = effort_rank(coordinator_effort?)?;
+    if coordinator_rank <= target_rank {
+        return None;
+    }
+
+    // Step down to the strongest level the worker's model actually accepts,
+    // never above the target and never above the coordinator.
+    let pick = available
+        .iter()
+        .filter_map(|level| effort_rank(level).map(|rank| (rank, level)))
+        .filter(|(rank, _)| *rank <= target_rank)
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, level)| level.clone())?;
+
+    if coordinator_effort.map(str::trim) == Some(pick.as_str()) {
+        return None;
+    }
+    Some(pick)
+}
+
 #[cfg(test)]
 #[path = "model_routing_tests.rs"]
 mod tests;

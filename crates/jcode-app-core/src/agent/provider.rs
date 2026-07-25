@@ -187,6 +187,24 @@ impl Agent {
         self.session.provider_key.clone()
     }
 
+    /// The reasoning effort in force for this session, if any.
+    ///
+    /// `None` means the provider's model default applies rather than an explicit
+    /// user choice, which callers must treat as "unknown" rather than "cheap".
+    pub fn session_reasoning_effort(&self) -> Option<String> {
+        self.session.reasoning_effort.clone()
+    }
+
+    /// Effort levels the active provider/model actually accepts, weakest first.
+    /// Empty when the model does not support reasoning effort at all.
+    pub fn available_efforts(&self) -> Vec<String> {
+        self.provider
+            .available_efforts()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
     /// API method/runtime route used to select the active model (e.g.
     /// "openai-api", "claude-oauth", "openai-compatible:nvidia-nim"). Spawned
     /// swarm agents inherit this so they reconstruct the coordinator's exact

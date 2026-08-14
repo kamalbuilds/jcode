@@ -1249,6 +1249,17 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
+    /// Ordered model ids offered after a provider guardrail/refusal stop, best
+    /// first. The first entry with an available route that is not the refusing
+    /// model wins. Ids are matched canonically, so `[1m]` suffixes and dated
+    /// variants (`claude-opus-4-8-20260201`) match their base id.
+    /// Default: the strongest model of each major family, so a refusal on one
+    /// vendor can hop to another instead of dead-ending.
+    pub guardrail_reroute_models: Vec<String>,
+    /// When no configured candidate has an available route, fall back to the
+    /// strongest available route from a provider other than the one that
+    /// refused. Set false to restrict reroutes to `guardrail_reroute_models`.
+    pub guardrail_reroute_cross_provider: bool,
 }
 
 impl Default for ProviderConfig {
@@ -1270,8 +1281,25 @@ impl Default for ProviderConfig {
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
+            guardrail_reroute_models: default_guardrail_reroute_models(),
+            guardrail_reroute_cross_provider: true,
         }
     }
+}
+
+/// Reroute candidates offered after a guardrail/refusal stop, best first.
+///
+/// A guardrail stop is a model-side policy decision, so the useful hop is to a
+/// *different* policy surface, not just a bigger model from the same vendor.
+/// One frontier model per major family is listed; entries without an available
+/// route are skipped, so a single-provider install still behaves as before.
+fn default_guardrail_reroute_models() -> Vec<String> {
+    vec![
+        "claude-opus-4-8".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "gemini-3-pro".to_string(),
+        "grok-4.6".to_string(),
+    ]
 }
 
 /// Ambient mode configuration

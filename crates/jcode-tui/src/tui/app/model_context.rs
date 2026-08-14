@@ -1,9 +1,14 @@
 use super::*;
 
-/// Reroute target offered after a provider guardrail/refusal stop. Guardrail
-/// refusals are model-side policy stops, so retrying the same model rarely
-/// helps; hopping to the strongest Anthropic route often does.
-const GUARDRAIL_REROUTE_MODEL: &str = "claude-opus-4-8";
+/// Tier words that mark a frontier-capability model, used to rank cross-provider
+/// guardrail reroute candidates when no configured candidate is available.
+const FRONTIER_TIER_WORDS: &[&str] = &["opus", "pro", "sol", "max", "ultra"];
+
+/// Tier words that mark a cheap/fast model, ranked last for reroutes: a small
+/// model is not a useful answer to a frontier model's refusal.
+const SMALL_TIER_WORDS: &[&str] = &[
+    "haiku", "mini", "nano", "flash", "lite", "small", "tiny", "instant", "micro",
+];
 
 impl App {
     fn format_failover_count(value: usize) -> String {
@@ -351,42 +356,98 @@ impl App {
         self.pending_fallback_resend = None;
     }
 
-    /// Whether `model` already is the guardrail reroute target
-    /// (`claude-opus-4-8`), tolerating case, `[1m]` suffixes, and dated ids.
-    fn is_guardrail_reroute_model(model: &str) -> bool {
-        let canonical = jcode_provider_core::model_id::canonical(model);
-        jcode_provider_core::model_id::strip_date_suffix(&canonical) == GUARDRAIL_REROUTE_MODEL
+    /// Compare two model ids ignoring case, `[1m]` suffixes, and date suffixes,
+    /// so `claude-opus-4-8-20260201[1m]` matches the configured `claude-opus-4-8`.
+    fn same_guardrail_model(model: &str, candidate: &str) -> bool {
+        let normalize = |value: &str| {
+            let canonical = jcode_provider_core::model_id::canonical(value);
+            jcode_provider_core::model_id::strip_date_suffix(&canonical).to_string()
+        };
+        normalize(model) == normalize(candidate)
     }
 
-    /// Pick the best available `claude-opus-4-8` route for a guardrail
-    /// reroute: native Anthropic OAuth first, then Anthropic API key, then any
-    /// other route (aggregators) in catalog order.
-    fn pick_guardrail_reroute_route(
-        routes: &[crate::provider::ModelRoute],
-    ) -> Option<&crate::provider::ModelRoute> {
-        let mut best: Option<(&crate::provider::ModelRoute, u8)> = None;
-        for route in routes {
-            if !route.available || !Self::is_guardrail_reroute_model(&route.model) {
+    /// Auth-path preference within a single model: native OAuth first, then a
+    /// first-party API key, then aggregators. Lower is better.
+    fn guardrail_route_auth_rank(route: &crate::provider::ModelRoute) -> u8 {
+        match crate::provider::ModelRouteApiMethod::parse(&route.api_method) {
+            crate::provider::ModelRouteApiMethod::ClaudeOAuth => 0,
+            crate::provider::ModelRouteApiMethod::AnthropicApiKey => 1,
+            _ => 2,
+        }
+    }
+
+    /// Capability rank for cross-provider fallback, lower is better. Only used
+    /// when no configured candidate is reachable, to avoid answering a frontier
+    /// model's refusal with a nano model.
+    fn guardrail_capability_rank(model: &str) -> u8 {
+        let id = jcode_provider_core::model_id::canonical(model).to_ascii_lowercase();
+        if SMALL_TIER_WORDS.iter().any(|word| id.contains(word)) {
+            return 2;
+        }
+        if FRONTIER_TIER_WORDS.iter().any(|word| id.contains(word)) {
+            return 0;
+        }
+        1
+    }
+
+    /// Pick the route to offer after a guardrail stop.
+    ///
+    /// Candidates are tried in configured order and the first one with an
+    /// available route wins, so the list expresses preference directly. The
+    /// refusing model is skipped entirely: retrying the same policy surface is
+    /// what the reroute exists to avoid. When nothing in the list is reachable
+    /// and `cross_provider` is on, fall back to the strongest available route
+    /// from any provider other than the one that just refused.
+    pub(crate) fn pick_guardrail_reroute_route<'a>(
+        routes: &'a [crate::provider::ModelRoute],
+        current_model: &str,
+        current_provider: &str,
+        candidates: &[String],
+        cross_provider: bool,
+    ) -> Option<&'a crate::provider::ModelRoute> {
+        for candidate in candidates {
+            if Self::same_guardrail_model(current_model, candidate) {
                 continue;
             }
-            let tier = match crate::provider::ModelRouteApiMethod::parse(&route.api_method) {
-                crate::provider::ModelRouteApiMethod::ClaudeOAuth => 0,
-                crate::provider::ModelRouteApiMethod::AnthropicApiKey => 1,
-                _ => 2,
-            };
-            if best.is_none_or(|(_, best_tier)| tier < best_tier) {
-                best = Some((route, tier));
+            let best = routes
+                .iter()
+                .filter(|route| {
+                    route.available && Self::same_guardrail_model(&route.model, candidate)
+                })
+                .min_by_key(|route| Self::guardrail_route_auth_rank(route));
+            if best.is_some() {
+                return best;
             }
         }
-        best.map(|(route, _)| route)
+
+        if !cross_provider {
+            return None;
+        }
+
+        // Nothing configured is reachable. Any other provider is still a
+        // different policy surface, so offer the strongest one available.
+        routes
+            .iter()
+            .filter(|route| {
+                route.available
+                    && !route.provider.eq_ignore_ascii_case(current_provider)
+                    && !Self::same_guardrail_model(&route.model, current_model)
+            })
+            .min_by_key(|route| {
+                (
+                    Self::guardrail_capability_rank(&route.model),
+                    Self::guardrail_route_auth_rank(route),
+                )
+            })
     }
 
     /// After a provider guardrail/refusal stop, arm a one-keypress offer to
-    /// reroute to the strongest Anthropic route (`claude-opus-4-8`) and resend
-    /// the refused request. Guardrail stops are model-side policy refusals:
-    /// retrying the same model usually refuses again, while a stronger model
-    /// often handles the same legitimate request. Returns true when an offer
-    /// was armed (the offer sets its own status notice).
+    /// reroute to a different model and resend the refused request. Guardrail
+    /// stops are model-side policy refusals: retrying the same model usually
+    /// refuses again, while a different model - especially one behind a
+    /// different vendor's policy layer - often handles the same legitimate
+    /// request. Returns true when an offer was armed (the offer sets its own
+    /// status notice).
     pub(super) fn offer_guardrail_reroute(&mut self) -> bool {
         // Never compete with the automatic countdown switcher or an offer
         // already armed by the error path.
@@ -394,12 +455,17 @@ impl App {
             return false;
         }
         let current_model = self.current_model_for_fallback();
-        // Already on the reroute target: nothing stronger to offer.
-        if Self::is_guardrail_reroute_model(&current_model) {
-            return false;
-        }
+        let current_provider_label = self.current_provider_label_for_fallback();
+        let provider_cfg = &crate::config::config().provider;
         let routes = self.fallback_candidate_routes();
-        let Some(route) = Self::pick_guardrail_reroute_route(&routes).cloned() else {
+        let Some(route) = Self::pick_guardrail_reroute_route(
+            &routes,
+            &current_model,
+            &current_provider_label,
+            &provider_cfg.guardrail_reroute_models,
+            provider_cfg.guardrail_reroute_cross_provider,
+        )
+        .cloned() else {
             return false;
         };
 
@@ -422,7 +488,7 @@ impl App {
         };
 
         let target_label = Self::describe_route(&route);
-        let current_provider = self.current_provider_label_for_fallback();
+        let current_provider = current_provider_label;
         let current_api_method = self.current_route_api_method().unwrap_or_default();
         let from_method = crate::provider::ModelRouteApiMethod::parse(&current_api_method);
         let from_label = if current_api_method.is_empty() {
@@ -438,7 +504,7 @@ impl App {
 
         let key_label = crate::tui::keybind::fallback_switch_key_label();
         self.push_display_message(DisplayMessage::system(format!(
-            "↪ Reroute available: press {} to switch to {} and resend this request.\n\nGuardrail refusals are model-side; a stronger model often handles the same request (was {}).",
+            "↪ Reroute available: press {} to switch to {} and resend this request.\n\nGuardrail refusals are model-side policy stops; a different model, especially one behind another vendor's policy layer, often handles the same request (was {}).",
             key_label, target_label, from_label,
         )));
         self.set_status_notice(format!("Press {} to reroute to {}", key_label, route.model));

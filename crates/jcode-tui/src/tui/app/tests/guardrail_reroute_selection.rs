@@ -116,6 +116,44 @@ mod guardrail_reroute_selection {
         );
     }
 
+    /// Aggregators namespace model ids, so a configured bare id has to match
+    /// the same model served as `vendor/model`.
+    #[test]
+    fn matches_namespaced_aggregator_ids() {
+        let routes = vec![route("x-ai/grok-4.6", "OpenRouter", "openrouter")];
+        let candidates = vec!["grok-4.6".to_string()];
+
+        let picked = App::pick_guardrail_reroute_route(
+            &routes,
+            "claude-opus-5",
+            "Anthropic",
+            &candidates,
+            false,
+        )
+        .expect("namespaced id matches the bare candidate");
+
+        assert_eq!(picked.model, "x-ai/grok-4.6");
+    }
+
+    /// The refusing model is skipped even when the available route carries an
+    /// aggregator namespace for that same model.
+    #[test]
+    fn skips_refusing_model_behind_an_aggregator() {
+        let routes = vec![route("anthropic/claude-opus-5", "OpenRouter", "openrouter")];
+        let candidates = vec!["claude-opus-5".to_string()];
+
+        assert!(
+            App::pick_guardrail_reroute_route(
+                &routes,
+                "claude-opus-5",
+                "Anthropic",
+                &candidates,
+                false,
+            )
+            .is_none()
+        );
+    }
+
     /// Unavailable routes are never offered, even when the model id matches a
     /// configured candidate.
     #[test]

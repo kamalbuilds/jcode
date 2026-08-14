@@ -356,12 +356,17 @@ impl App {
         self.pending_fallback_resend = None;
     }
 
-    /// Compare two model ids ignoring case, `[1m]` suffixes, and date suffixes,
-    /// so `claude-opus-4-8-20260201[1m]` matches the configured `claude-opus-4-8`.
+    /// Compare two model ids ignoring case, `[1m]` suffixes, date suffixes, and
+    /// aggregator namespaces, so `claude-opus-4-8-20260201[1m]` and
+    /// `openrouter/anthropic/claude-opus-4-8` both match a configured
+    /// `claude-opus-4-8`. Aggregators namespace the same model the vendor
+    /// serves bare, so comparing the raw ids would make every configured
+    /// candidate unreachable through OpenRouter and friends.
     fn same_guardrail_model(model: &str, candidate: &str) -> bool {
         let normalize = |value: &str| {
             let canonical = jcode_provider_core::model_id::canonical(value);
-            jcode_provider_core::model_id::strip_date_suffix(&canonical).to_string()
+            let base = jcode_provider_core::model_id::slash_base(&canonical);
+            jcode_provider_core::model_id::strip_date_suffix(base).to_string()
         };
         normalize(model) == normalize(candidate)
     }
